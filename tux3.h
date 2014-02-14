@@ -17,6 +17,8 @@
 #include <linux/list_sort.h>
 
 #include "newDefines.h"
+//#include "compression.h"
+
 #include "trace.h"
 #include "buffer.h"
 #endif /* !__KERNEL__ */

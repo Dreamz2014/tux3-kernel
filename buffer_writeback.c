@@ -2,7 +2,6 @@
  * Write back buffers
  */
 
-
 #include "buffer_writebacklib.c"
 
 /*
@@ -70,8 +69,10 @@ static void bufvec_init(struct bufvec *bufvec, struct address_space *mapping,
 		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
 	}
 	INIT_LIST_HEAD(&bufvec->contig);
+	INIT_LIST_HEAD(&bufvec->compress);
 	bufvec->buffers		= head;
 	bufvec->contig_count	= 0;
+	bufvec->compress_count  = 0;
 	bufvec->idata		= idata;
 	bufvec->mapping		= mapping;
 	bufvec->on_page_idx	= 0;
@@ -108,6 +109,45 @@ static inline void bufvec_buffer_move_to_contig(struct bufvec *bufvec,
 	list_move_tail(&buffer->b_assoc_buffers, &bufvec->contig);
 	bufvec->contig_count++;
 }
+
+
+static inline void bufvec_contig_move_to_compress(struct bufvec *bufvec,
+						struct buffer_head *buffer)
+{
+	if(DEBUG_MODE_K==1)
+	{
+		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
+	}
+	struct address_space *buffer_mapping;
+	
+	buffer_mapping = buffer->b_page->mapping;
+	spin_lock(&buffer_mapping->private_lock);
+	list_move_tail(&buffer->b_assoc_buffers, &bufvec->compress);
+	spin_unlock(&buffer_mapping->private_lock);
+
+	bufvec->contig_count--;
+	bufvec->compress_count++;
+}
+
+static inline void bufvec_compress_move_to_contig(struct bufvec *bufvec,
+						struct buffer_head *buffer)
+{
+	if(DEBUG_MODE_K==1)
+	{
+		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
+	}
+	struct address_space *buffer_mapping;
+
+	buffer_mapping = buffer->b_page->mapping;
+	spin_lock(&buffer_mapping->private_lock);
+	list_move_tail(&buffer->b_assoc_buffers, &bufvec->contig);
+	spin_unlock(&buffer_mapping->private_lock);
+	
+	bufvec->contig_count++;
+	bufvec->compress_count--;;
+}
+
+#include "compression.c"
 
 /*
  * Special purpose single pointer list (FIFO order) for buffers on bio
@@ -560,7 +600,7 @@ static void bufvec_bio_add_page(int rw, struct bufvec *bufvec)
 	offset = bh_offset(bufvec->on_page[0].buffer);
 	length = bufvec->on_page_idx << sb->blockbits;
 
-	trace("page %p, index %Lu, physical %Lu, length %u, offset %u",
+        printk(KERN_INFO "bufvec_bio_add_page => page %p, index %Lu, physical %Lu, length %u, offset %u",
 	      page, bufindex(bufvec->on_page[0].buffer), physical,
 	      length, offset);
 
@@ -585,7 +625,7 @@ static void bufvec_bio_add_page(int rw, struct bufvec *bufvec)
 		block_t physical = bufvec->on_page[i].block;
 		get_bh(buffer);
 		tux3_clear_buffer_dirty_for_io(buffer, sb, physical);
-		bufvec_bio_add_buffer(bufvec, buffer);
+		bufvec_bio_add_buffer(bufvec, buffer);/*??*/
 	}
 	bufvec_prepare_and_unlock_page(page);
 
@@ -651,7 +691,7 @@ int bufvec_io(int rw, struct bufvec *bufvec, block_t physical, unsigned count)
 	unsigned int i;
 	int need_check = 0;
 
-	printk(KERN_INFO "\nBufvec => contig_index %Lu, contig_count %u, physical %Lu, count %u\n",
+	printk(KERN_INFO "\nbufvec => contig_index %Lu, contig_count %u, physical %Lu, count %u\n",
 	      bufvec_contig_index(bufvec), bufvec_contig_count(bufvec),
 	      physical, count);
 
@@ -838,7 +878,7 @@ static int bufvec_contig_collect(struct bufvec *bufvec)
 
 	do {
 		/* Check contig_count limit */
-	  if (bufvec_contig_count(bufvec) == 4)//MAX_BUFVEC_COUNT
+		if (bufvec_contig_count(bufvec) == COMPRESSION_STRIDE_LEN)//MAX_BUFVEC_COUNT
 			break;
 	  
 		bufvec_buffer_move_to_contig(bufvec, buffer);
@@ -858,6 +898,9 @@ static int bufvec_contig_collect(struct bufvec *bufvec)
 		}
 	} while (last_index == next_index - 1);
 
+	if(bufvec_inode(bufvec)->i_ino >= 64)
+		compress_stride(bufvec);
+	
 	return !!bufvec_contig_count(bufvec);
 }
 
@@ -899,6 +942,7 @@ static int buffer_index_cmp(void *priv, struct list_head *a,
 /*
  * Flush buffers in head
  */
+
 int flush_list(struct address_space *mapping, struct tux3_iattr_data *idata,
 	       struct list_head *head)
 {

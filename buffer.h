@@ -87,6 +87,8 @@ struct bufvec {
 	struct list_head *buffers;	/* The dirty buffers for this delta */
 	struct list_head contig;	/* One logical contiguous range */
 	unsigned contig_count;		/* Count of contiguous buffers */
+	struct list_head compress;      //
+	unsigned compress_count;        //
 	struct tux3_iattr_data *idata;	/* inode attrs for write */
 	struct address_space *mapping;	/* address_space for dirty buffers */
 
@@ -110,6 +112,11 @@ static inline unsigned bufvec_contig_count(struct bufvec *bufvec)
 	return bufvec->contig_count;
 }
 
+static inline unsigned bufvec_compress_count(struct bufvec *bufvec)
+{
+	return bufvec->compress_count;
+}
+
 static inline struct buffer_head *bufvec_contig_buf(struct bufvec *bufvec)
 {
 	struct list_head *first = bufvec->contig.next;
@@ -120,6 +127,9 @@ static inline struct buffer_head *bufvec_contig_buf(struct bufvec *bufvec)
 /* buffer for each contiguous buffers */
 #define bufvec_buffer_for_each_contig(b, v)	\
 	list_for_each_entry(b, &(v)->contig, b_assoc_buffers)
+
+#define bufvec_buffer_for_each_compress(b, v)	\
+	list_for_each_entry(b, &(v)->compress, b_assoc_buffers)
 
 static inline block_t bufvec_contig_index(struct bufvec *bufvec)
 {

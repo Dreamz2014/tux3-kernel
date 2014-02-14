@@ -435,7 +435,7 @@ found_partial:
 		sb->nextblock = 0;
 	//set_sb_dirty(sb);
 
-	printk(KERN_INFO "\nballoc extent [block %Lx, count %x]\n", found, blocks);
+	printk(KERN_INFO "\nballoc extent [block %Lx, count %u]\n", found, blocks);
 
 	return 0;
 }
