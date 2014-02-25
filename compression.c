@@ -52,6 +52,9 @@ static void free_workspace(struct workspace *workspace)
 	kfree(workspace);
 }
 
+//Regular files ->
+//if (S_ISREG(inode->i_mode))...compress
+
 int compress_stride(struct bufvec *bufvec)
 {
 	if(DEBUG_MODE_K==1)
@@ -62,7 +65,8 @@ int compress_stride(struct bufvec *bufvec)
 	struct buffer_head *buffer;
 	struct workspace *workspace;
 	struct list_head *list;
-	unsigned offset, out_blocks, length;
+	struct page *page;
+	unsigned nr_pages, page_idx, offset, length;
 	unsigned len = bufvec_contig_count(bufvec);
 	size_t in_len, out_len, tail;
 	char *data;
@@ -71,15 +75,6 @@ int compress_stride(struct bufvec *bufvec)
 	workspace = init_workspace(len);
 //	buffer = list_entry(bufvec->contig.next, struct buffer_head, b_assoc_buffers);
 	printk(KERN_INFO"\n[C]inode : %lu", inode->i_ino);
-/*
-	buffer_mapping = buffer->b_page->mapping;
-	spin_lock(&buffer_mapping->private_lock);
-	
-	bufvec_contig_move_to_compress(bufvec, buffer);//why?
-	bufvec_compress_move_to_contig(bufvec, buffer);
-	
-	spin_unlock(&buffer_mapping->private_lock);
-*/
 	
 	in_len = bufvec_contig_count(bufvec)*PAGE_CACHE_SIZE;
 	out_len = 0;
@@ -87,9 +82,8 @@ int compress_stride(struct bufvec *bufvec)
 	offset = 0;
 	bufvec_buffer_for_each_contig(buffer,bufvec){
 		
-		printk("[C]Index : %Lu\n",bufindex(buffer));
+		//printk("[C]Index : %Lu\n",bufindex(buffer));
 		data = kmap(buffer->b_page);
-		
 		memcpy((char *)workspace->d_buf + offset, data, PAGE_CACHE_SIZE);
 		offset += PAGE_CACHE_SIZE;
 		kunmap(buffer->b_page);
@@ -110,7 +104,7 @@ int compress_stride(struct bufvec *bufvec)
 	ret = lzo1x_1_compress(workspace->d_buf, in_len, workspace->c_buf,
 			       &out_len, workspace->mem);
 
-	out_blocks = out_len / PAGE_CACHE_SIZE +1;
+	nr_pages = out_len / PAGE_CACHE_SIZE + 1;
 	if (ret != LZO_E_OK) 
 	{
 		printk(KERN_DEBUG "tux3_compr error :  %d\n",ret);
@@ -119,32 +113,39 @@ int compress_stride(struct bufvec *bufvec)
 	else
 	{
 		tail = PAGE_CACHE_SIZE - (out_len % PAGE_CACHE_SIZE);
-		printk(KERN_INFO"COMPRESSED FROM %zu to %zu | Compressed_blocks : %zu, tail : %zu\n", in_len, out_len, out_blocks, tail);
+		printk(KERN_INFO"COMPRESSED FROM %zu to %zu | Compressed_blocks : %zu, tail : %zu\n", in_len, out_len, nr_pages, tail);
 		memset((char *)workspace->c_buf + out_len, 0, tail);
 	}
-
-	length = 0;
-	offset = 0;
-	bufvec_buffer_for_each_compress(buffer,bufvec){
 	
-		if(out_blocks > 0)
-		{
-			printk("[Write_C]Index : %Lu\n",bufindex(buffer));
-			data = kmap(buffer->b_page);
-		
-			memcpy(data, (char *)workspace->c_buf + offset, PAGE_CACHE_SIZE);
-			offset += PAGE_CACHE_SIZE;
-			kunmap(buffer->b_page);
-			out_blocks--;
-			length++;
+	bufvec->compressed_pages = kzalloc(sizeof(struct page *) * nr_pages, GFP_NOFS);
+	if(!bufvec->compressed_pages){
+		/* ERROR... EXIT */
+		ret = -1;
+		goto out;
+	}
+
+	offset = 0;
+	for(page_idx = 0; page_idx < nr_pages; page_idx++)
+	{
+		page = alloc_page(GFP_NOFS |__GFP_HIGHMEM);
+		if(!page){
+			/* ERROR */
+			ret = -1;
+			goto out;
 		}
+		data = kmap(page);
+		memcpy(data, (char *)workspace->c_buf + offset, PAGE_CACHE_SIZE);
+		offset += PAGE_CACHE_SIZE;
+		kunmap(page);
+		bufvec->compressed_pages[page_idx] = page;
 	}
 	
+	length = nr_pages;
 	while(length)
 	{
 		list = bufvec->compress.next;
 		buffer = list_entry(list, struct buffer_head, b_assoc_buffers);
-		printk(KERN_INFO "Move_to_contig : %Lu",bufindex(buffer));
+		//printk(KERN_INFO "Move_to_contig : %Lu",bufindex(buffer));
 		
 		bufvec_compress_move_to_contig(bufvec, buffer);
 		length--;
@@ -163,7 +164,8 @@ int compress_stride(struct bufvec *bufvec)
 		}
 		//remove_inode_buffers(inode);
 	}
-*/	
+*/
+out:
 	free_workspace(workspace);
 	return 0;
 }

@@ -81,6 +81,46 @@ struct iowait {
 	struct completion done;		/* completion for in-flight I/O */
 };
 
+/* Helper for compressed I/O */
+struct compressed_bio {
+	/* number of bios pending for this compressed extent */
+	atomic_t pending_bios;
+
+	/* the pages with the compressed data on them */
+	struct page **compressed_pages;
+
+	/* inode that owns this data */
+	struct inode *inode;
+
+	/* starting offset in the inode for our pages */
+	block_t start;
+
+	/* number of bytes in the inode we're working on */
+	unsigned long len;
+
+	/* number of bytes on disk */
+	unsigned long compressed_len;
+
+	/* the compression algorithm for this bio */
+	int compress_type;
+
+	/* number of compressed pages in the array */
+	unsigned long nr_pages;
+
+	/* IO errors */
+	int errors;
+	//int mirror_num;
+
+	/* for reads, this is the bio we are copying the data into */
+	struct bio *orig_bio;
+
+	/*
+	 * the start of a variable length array of checksums only
+	 * used by reads
+	 */
+	//u32 sums;
+};
+
 /* Helper for buffer vector I/O */
 #define BUFS_PER_PAGE_CACHE	(PAGE_CACHE_SIZE / 512)
 struct bufvec {
@@ -98,6 +138,7 @@ struct bufvec {
 	} on_page[BUFS_PER_PAGE_CACHE];
 	unsigned on_page_idx;
 
+	struct page **compressed_pages;
 	struct bio *bio;
 	struct buffer_head *bio_lastbuf;
 };

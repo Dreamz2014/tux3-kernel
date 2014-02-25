@@ -87,6 +87,7 @@ int blockio(int rw, struct sb *sb, struct buffer_head *buffer, block_t block)
  * If there was I/O error, it would be handled in ->bi_end_bio()
  * completion.
  */
+
 int blockio_vec(int rw, struct bufvec *bufvec, block_t block, unsigned count)
 {
 	if(DEBUG_MODE_K==1)

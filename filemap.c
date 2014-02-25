@@ -708,7 +708,7 @@ static int filemap_extent_io(enum map_mode mode, int rw, struct bufvec *bufvec)
 		block = seg[i].block;
 		count = seg[i].count;
 
-		printk("\nLoop => extent 0x%Lx/%x => %Lx", index, count, block);
+		//printk("\nLoop => extent 0x%Lx/%x => %Lx", index, count, block);
 
 		err = blockio_vec(rw, bufvec, block, count);
 		if (err)
