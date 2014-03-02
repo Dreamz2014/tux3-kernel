@@ -96,23 +96,23 @@ struct compressed_bio {
 	block_t start;
 
 	/* number of bytes in the inode we're working on */
-	unsigned long len;
+	unsigned len;
 
 	/* number of bytes on disk */
-	unsigned long compressed_len;
+	unsigned compressed_len;
 
 	/* the compression algorithm for this bio */
 	int compress_type;
 
 	/* number of compressed pages in the array */
-	unsigned long nr_pages;
+	unsigned nr_pages;
 
 	/* IO errors */
 	int errors;
 	//int mirror_num;
 
 	/* for reads, this is the bio we are copying the data into */
-	struct bio *orig_bio;
+	//struct bio *orig_bio;
 
 	/*
 	 * the start of a variable length array of checksums only
@@ -127,8 +127,6 @@ struct bufvec {
 	struct list_head *buffers;	/* The dirty buffers for this delta */
 	struct list_head contig;	/* One logical contiguous range */
 	unsigned contig_count;		/* Count of contiguous buffers */
-	struct list_head compress;      //
-	unsigned compress_count;        //
 	struct tux3_iattr_data *idata;	/* inode attrs for write */
 	struct address_space *mapping;	/* address_space for dirty buffers */
 
@@ -138,7 +136,9 @@ struct bufvec {
 	} on_page[BUFS_PER_PAGE_CACHE];
 	unsigned on_page_idx;
 
-	struct page **compressed_pages;
+	struct compressed_bio *cb;
+	unsigned compress_index;
+	
 	struct bio *bio;
 	struct buffer_head *bio_lastbuf;
 };
@@ -153,11 +153,6 @@ static inline unsigned bufvec_contig_count(struct bufvec *bufvec)
 	return bufvec->contig_count;
 }
 
-static inline unsigned bufvec_compress_count(struct bufvec *bufvec)
-{
-	return bufvec->compress_count;
-}
-
 static inline struct buffer_head *bufvec_contig_buf(struct bufvec *bufvec)
 {
 	struct list_head *first = bufvec->contig.next;
@@ -168,9 +163,6 @@ static inline struct buffer_head *bufvec_contig_buf(struct bufvec *bufvec)
 /* buffer for each contiguous buffers */
 #define bufvec_buffer_for_each_contig(b, v)	\
 	list_for_each_entry(b, &(v)->contig, b_assoc_buffers)
-
-#define bufvec_buffer_for_each_compress(b, v)	\
-	list_for_each_entry(b, &(v)->compress, b_assoc_buffers)
 
 static inline block_t bufvec_contig_index(struct bufvec *bufvec)
 {
@@ -184,6 +176,7 @@ static inline block_t bufvec_contig_last_index(struct bufvec *bufvec)
 
 void tux3_iowait_init(struct iowait *iowait);
 void tux3_iowait_wait(struct iowait *iowait);
+int bufvec_compressed_io(int rw, struct bufvec *bufvec, block_t physical, unsigned count);
 int bufvec_io(int rw, struct bufvec *bufvec, block_t physical, unsigned count);
 int bufvec_contig_add(struct bufvec *bufvec, struct buffer_head *buffer);
 int flush_list(struct address_space *mapping, struct tux3_iattr_data *idata,

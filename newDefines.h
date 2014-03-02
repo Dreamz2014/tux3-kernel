@@ -1,6 +1,6 @@
-#define DEBUG_MODE_U 1
-#define DEBUG_MODE_L 1
-#define DEBUG_MODE_K 1
+#define DEBUG_MODE_U 0
+#define DEBUG_MODE_L 0
+#define DEBUG_MODE_K 0
 #define DEBUG_RW 1
 #define ALLOW_BUILTIN_LOG 1
 #define ENABLE_TRANSPARENT_COMPRESSION 1

@@ -94,6 +94,9 @@ int blockio_vec(int rw, struct bufvec *bufvec, block_t block, unsigned count)
 	{
 		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
 	}
+	if (bufvec->cb && ENABLE_TRANSPARENT_COMPRESSION)
+		return bufvec_compressed_io(rw, bufvec, block, bufvec->cb->nr_pages);
+	
 	return bufvec_io(rw, bufvec, block, count);
 }
 

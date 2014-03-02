@@ -328,6 +328,7 @@ struct block_segment {
 	block_t block;		/* Start of physical address */
 	unsigned count;		/* Number of blocks */
 	unsigned state;		/* State of this segment */
+//	unsigned compress_count;/* CHECK */
 };
 
 /*

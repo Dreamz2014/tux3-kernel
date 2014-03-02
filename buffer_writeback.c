@@ -69,14 +69,13 @@ static void bufvec_init(struct bufvec *bufvec, struct address_space *mapping,
 		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
 	}
 	INIT_LIST_HEAD(&bufvec->contig);
-	INIT_LIST_HEAD(&bufvec->compress);
 	bufvec->buffers		= head;
-	bufvec->contig_count	= 0;
-	bufvec->compress_count  = 0;
+	bufvec->contig_count    = 0;
 	bufvec->idata		= idata;
 	bufvec->mapping		= mapping;
 	bufvec->on_page_idx	= 0;
-	bufvec->compressed_pages= NULL;
+	bufvec->compress_index  = 0;
+	bufvec->cb         	= NULL;
 	bufvec->bio		= NULL;
 	bufvec->bio_lastbuf	= NULL;
 }
@@ -91,6 +90,7 @@ static void bufvec_free(struct bufvec *bufvec)
 	assert(!bufvec->buffers || list_empty(bufvec->buffers));
 	assert(list_empty(&bufvec->contig));
 	assert(bufvec->bio == NULL);
+	assert(bufvec->cb == NULL);
 }
 
 static inline void bufvec_buffer_move_to_contig(struct bufvec *bufvec,
@@ -111,45 +111,7 @@ static inline void bufvec_buffer_move_to_contig(struct bufvec *bufvec,
 	bufvec->contig_count++;
 }
 
-//compression code
-static inline void bufvec_contig_move_to_compress(struct bufvec *bufvec,
-						struct buffer_head *buffer)
-{
-	if(DEBUG_MODE_K==1)
-	{
-		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
-	}
-	struct address_space *buffer_mapping;
-	
-	buffer_mapping = buffer->b_page->mapping;
-	spin_lock(&buffer_mapping->private_lock);
-	list_move_tail(&buffer->b_assoc_buffers, &bufvec->compress);
-	spin_unlock(&buffer_mapping->private_lock);
-
-	bufvec->contig_count--;
-	bufvec->compress_count++;
-}
-
-static inline void bufvec_compress_move_to_contig(struct bufvec *bufvec,
-						struct buffer_head *buffer)
-{
-	if(DEBUG_MODE_K==1)
-	{
-		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
-	}
-	struct address_space *buffer_mapping;
-
-	buffer_mapping = buffer->b_page->mapping;
-	spin_lock(&buffer_mapping->private_lock);
-	list_move_tail(&buffer->b_assoc_buffers, &bufvec->contig);
-	spin_unlock(&buffer_mapping->private_lock);
-	
-	bufvec->contig_count++;
-	bufvec->compress_count--;;
-}
-
 #include "compression.c"
-//compression code end
 
 /*
  * Special purpose single pointer list (FIFO order) for buffers on bio
@@ -183,7 +145,6 @@ static struct buffer_head *bufvec_bio_del_buffer(struct bio *bio)
 		bio->bi_private = buffer->b_private;
 		buffer->b_private = NULL;
 	}
-
 	return buffer;
 }
 
@@ -238,7 +199,12 @@ static void bufvec_submit_bio(int rw, struct bufvec *bufvec)
 
 	bufvec->bio = NULL;
 	bufvec->bio_lastbuf = NULL;
-
+	
+	if (bufvec->cb && S_ISREG(bufvec_inode(bufvec)->i_mode) && ENABLE_TRANSPARENT_COMPRESSION) {
+		bio->bi_private = bufvec->cb;
+		atomic_inc(&bufvec->cb->pending_bios);	
+	}
+	bufvec->cb = NULL;
 	printk(KERN_INFO "\nsubmit_bio => bio %p, physical %Lu, count %u\n", bio,
 	      (block_t)bio->bi_sector >> (sb->blockbits - 9),
 	      bio->bi_size >> sb->blockbits);
@@ -537,6 +503,51 @@ static void bufvec_bio_add_multiple(int rw, struct bufvec *bufvec)
 }
 
 /*
+ * bio completion for compressed I/O
+ */
+static void compressed_end_io(struct bio *bio, int err)
+{
+	struct compressed_bio *cb =  bio->bi_private;
+	struct inode *inode = cb->inode;
+	struct page *pages[16];
+	struct page *page;
+	unsigned page_idx;
+	int i, ret;
+	
+	bio->bi_private = NULL;
+	if (err) {
+		BUG_ON(1);	
+		cb->errors = 1;
+	}
+	
+	if(!atomic_dec_and_test(&cb->pending_bios))
+		goto out;
+
+	/* Last bio for this stride */
+	ret = find_get_pages_contig(inode->i_mapping, cb->start,
+				    ARRAY_SIZE(pages), pages);
+	for(i = 0; i < ret; i++) {
+		end_page_writeback(pages[i]);
+		//tux3_accout_clear_writeback(pages[i]);
+		page_cache_release(pages[i]);
+	}
+	
+	/* Release compressed pages */
+	for(page_idx = 0; page_idx < cb->nr_pages; page_idx++) {
+		page = cb->compressed_pages[page_idx];
+		page->mapping = NULL;
+		page_cache_release(page);
+	}
+
+	kfree(cb->compressed_pages);
+	kfree(cb);
+	
+out:
+	iowait_inflight_dec(tux_sb(inode->i_sb)->iowait);
+	bio_put(bio);
+}
+
+/*
  * bio completion for bufvec based I/O
  */
 static void bufvec_end_io(struct bio *bio, int err)
@@ -554,28 +565,24 @@ static void bufvec_end_io(struct bio *bio, int err)
 
 	/* FIXME: inode is still guaranteed to be available? */
 	mapping = bufvec_bio_mapping(bio);
-
+	
 	/* Remove buffer from bio, then unlock buffer */
 	page = last_page = NULL;
-	//use find_get_pages & clear ?!
 	
-	if(mapping->host->i_ino < 64) {
-		
-		while (1) {
-			struct buffer_head *buffer = bufvec_bio_del_buffer(bio);
-			if (!buffer)
-				break;
+	while (1) {
+		struct buffer_head *buffer = bufvec_bio_del_buffer(bio);
+		if (!buffer)
+			break;
 
-			page = buffer->b_page;
+		page = buffer->b_page;
 
-			trace("buffer %p", buffer);
-			tux3_clear_buffer_dirty_for_io_hack(buffer);
-			put_bh(buffer);
+		trace("buffer %p", buffer);
+		tux3_clear_buffer_dirty_for_io_hack(buffer);
+		put_bh(buffer);
 
-			if (page != last_page) {
-				bufvec_page_end_io(page, uptodate, quiet);
-				last_page = page;
-			}
+		if (page != last_page) {
+			bufvec_page_end_io(page, uptodate, quiet);
+			last_page = page;
 		}
 	}
 	
@@ -590,7 +597,7 @@ static void bufvec_end_io(struct bio *bio, int err)
  * FIXME: We can free buffers early, and avoid to use buffers in I/O
  * completion, after prepared the page (like __mpage_writepage).
  */
-static void bufvec_bio_add_page(int rw, struct bufvec *bufvec, int count)
+static void bufvec_bio_add_page(int rw, struct bufvec *bufvec)
 {
 	if(DEBUG_MODE_K==1)
 	{
@@ -602,18 +609,9 @@ static void bufvec_bio_add_page(int rw, struct bufvec *bufvec, int count)
 	block_t physical;
 	unsigned i, length, offset;
 
-	if(bufvec_inode(bufvec)->i_ino >= 64) {
-		page = bufvec->compressed_pages[count];
-		page->mapping = NULL;
-		//TestSetPageWriteback(page);//
-		length = PAGE_CACHE_SIZE;
-		offset = 0;
-	}
-	else {
-		page = bufvec->on_page[0].buffer->b_page;
-		offset = bh_offset(bufvec->on_page[0].buffer);
-		length = bufvec->on_page_idx << sb->blockbits;
-	}
+	page = bufvec->on_page[0].buffer->b_page;
+	offset = bh_offset(bufvec->on_page[0].buffer);
+	length = bufvec->on_page_idx << sb->blockbits;
 	physical = bufvec->on_page[0].block;
 	
 	assert(page);
@@ -630,27 +628,21 @@ static void bufvec_bio_add_page(int rw, struct bufvec *bufvec, int count)
 		bufvec->bio =bufvec_bio_alloc(sb, bufvec_contig_count(bufvec) + 1,
 					 physical, bufvec_end_io);
 		
-		if(bufvec_inode(bufvec)->i_ino >= 64)
-			bufvec->bio->bi_private = bufvec->on_page[0].buffer;
-		
 		if (!bio_add_page(bufvec->bio, page, length, offset))//length, offset
 			assert(0);	/* why? */
 	}
 
 	/* Prepare the page, and buffers on the page for I/O */
-
-	if(bufvec_inode(bufvec)->i_ino < 64){
-		
-		bufvec_prepare_and_lock_page(bufvec, page);
-		for (i = 0; i < bufvec->on_page_idx; i++) {
-			struct buffer_head *buffer = bufvec->on_page[i].buffer;
-			block_t physical = bufvec->on_page[i].block;
-			get_bh(buffer);
-			tux3_clear_buffer_dirty_for_io(buffer, sb, physical);
-			bufvec_bio_add_buffer(bufvec, buffer);//??
-		}
-		bufvec_prepare_and_unlock_page(page);
+	bufvec_prepare_and_lock_page(bufvec, page);
+	for (i = 0; i < bufvec->on_page_idx; i++) {
+		struct buffer_head *buffer = bufvec->on_page[i].buffer;
+		block_t physical = bufvec->on_page[i].block;
+		get_bh(buffer);
+		tux3_clear_buffer_dirty_for_io(buffer, sb, physical);
+		bufvec_bio_add_buffer(bufvec, buffer);
 	}
+	bufvec_prepare_and_unlock_page(page);
+	
 	bufvec->on_page_idx = 0;
 }
 
@@ -758,12 +750,80 @@ int bufvec_io(int rw, struct bufvec *bufvec, block_t physical, unsigned count)
 			if (multiple)
 				bufvec_bio_add_multiple(rw, bufvec);
 			else
-				bufvec_bio_add_page(rw, bufvec, i);//
+				bufvec_bio_add_page(rw, bufvec);//
 		}
 	}
 
 	/* If no more buffer, submit the pending bio */
 	if (bufvec->bio && !bufvec_next_buffer_page(bufvec))
+		bufvec_submit_bio(rw, bufvec);
+
+	return 0;
+}
+
+int bufvec_compressed_io(int rw, struct bufvec *bufvec, block_t physical, unsigned count)
+{
+	if(DEBUG_MODE_K==1)
+	{
+		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
+	}
+	struct sb *sb = tux_sb(bufvec_inode(bufvec)->i_sb);
+	struct page *page;
+	struct buffer_head *buffer;
+	struct address_space *buffer_mapping;
+	unsigned i, page_idx;
+
+	printk(KERN_INFO "\nbufvec_compressed => physical %Lu, count %u\n", physical, count);
+	assert(rw & WRITE);	/* FIXME: now only support WRITE */
+	assert(bufvec->cb->nr_pages == count);
+
+	/* Remove STRIDE no. of buffers from bufvec */
+	for(i = 0; i < COMPRESSION_STRIDE_LEN; i++) {
+		if(list_empty(&bufvec->contig))
+			break;
+		
+		buffer = bufvec_contig_buf(bufvec);
+		
+		page = buffer->b_page;
+		//bufvec_prepare_and_lock_page(bufvec, page);
+		lock_page(page);
+		clear_page_dirty_for_io(page);
+		test_set_page_writeback(page);
+		unlock_page(page);
+		//bufvec_prepare_and_unlock_page(page);
+		
+		/* FIXME: need lock? (buffer is already owned by backend...) */
+		buffer_mapping = buffer->b_page->mapping;
+		spin_lock(&buffer_mapping->private_lock);		
+		bufvec->contig_count--;
+		list_del_init(&buffer->b_assoc_buffers);
+		tux3_clear_bufdelta(buffer);
+		clear_buffer_dirty(buffer);
+		tux3_clear_buffer_dirty_for_io_hack(buffer);//in end_io?
+		spin_unlock(&buffer_mapping->private_lock);
+	}
+	
+	for (page_idx = 0; page_idx < count; page_idx++) {
+		page = bufvec->cb->compressed_pages[page_idx];
+		page->mapping = NULL;
+	
+		assert(page);
+		/* Try to add buffers to exists bio */
+		if (!bufvec->bio || !bio_add_page(bufvec->bio, page, PAGE_CACHE_SIZE, 0)) {
+			/* Couldn't add. So submit old bio and allocate new bio */
+			if (bufvec->bio)
+				bufvec_submit_bio(rw, bufvec);
+
+			bufvec->bio = bufvec_bio_alloc(sb, bufvec->cb->nr_pages - page_idx,
+						      physical + page_idx, compressed_end_io);
+		
+			if (!bio_add_page(bufvec->bio, page, PAGE_CACHE_SIZE, 0))
+				assert(0);	/* why? */
+		}		
+	}
+
+	/* If no more buffer, submit the pending bio */
+	if (bufvec->bio)
 		bufvec_submit_bio(rw, bufvec);
 
 	return 0;
@@ -900,7 +960,8 @@ static int bufvec_contig_collect(struct bufvec *bufvec)
 
 	do {
 		/* Check contig_count limit */
-		if (bufvec_contig_count(bufvec) == COMPRESSION_STRIDE_LEN)//MAX_BUFVEC_COUNT
+		if (bufvec_contig_count(bufvec) ==
+		    (ENABLE_TRANSPARENT_COMPRESSION ? COMPRESSION_STRIDE_LEN : MAX_BUFVEC_COUNT))
 			break;
 	  
 		bufvec_buffer_move_to_contig(bufvec, buffer);
@@ -919,14 +980,7 @@ static int bufvec_contig_collect(struct bufvec *bufvec)
 			break;
 		}
 	} while (last_index == next_index - 1);
-
-	if(ENABLE_TRANSPARENT_COMPRESSION)
-	{
-		if(bufvec_inode(bufvec)->i_ino >= 64)
-		{
-			compress_stride(bufvec);
-		}
-	}
+	
 	return !!bufvec_contig_count(bufvec);
 }
 
@@ -993,6 +1047,9 @@ int flush_list(struct address_space *mapping, struct tux3_iattr_data *idata,
 	while (bufvec_next_buffer_page(&bufvec)) {
 		/* Collect contiguous buffer range */
 		if (bufvec_contig_collect(&bufvec)) {
+			
+			if(ENABLE_TRANSPARENT_COMPRESSION && S_ISREG(inode->i_mode))
+				compress_stride(&bufvec);
 			/* Start I/O */
 			err = tux_inode(inode)->io(WRITE, &bufvec);
 			if (err)

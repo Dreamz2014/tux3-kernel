@@ -699,15 +699,27 @@ static int filemap_extent_io(enum map_mode mode, int rw, struct bufvec *bufvec)
 	assert(mode != MAP_READ);
 
 	printk("\nfilemap_extent_io => inode : %lu | index : %Lu | count : %u", inode->i_ino, index, count);
-	
+
+	if (bufvec->cb && S_ISREG(inode->i_mode) && ENABLE_TRANSPARENT_COMPRESSION) {
+		index = bufvec->compress_index;
+		count = bufvec->cb->nr_pages;
+
+		bufvec->compress_index += count;
+	}
+	/* CHECK */
+/*	if(bufvec->cb)
+		seg[0].compress_count = bufvec->cb->nr_pages;
+	else
+		seg[0].compress_count = 0;
+*/	
 	int segs = map_region(inode, index, count, seg, ARRAY_SIZE(seg), mode);
 	if (segs < 0)
 		return segs;
 	assert(segs);
+	
 	for (int i = 0; i < segs; i++) {
 		block = seg[i].block;
 		count = seg[i].count;
-
 		//printk("\nLoop => extent 0x%Lx/%x => %Lx", index, count, block);
 
 		err = blockio_vec(rw, bufvec, block, count);
@@ -716,7 +728,6 @@ static int filemap_extent_io(enum map_mode mode, int rw, struct bufvec *bufvec)
 
 		index += count;
 	}
-
 	return err;
 }
 
