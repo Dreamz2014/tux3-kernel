@@ -378,7 +378,7 @@ static int seg_alloc(struct btree *btree, struct dleaf_req *rq,
 	}
 	struct sb *sb = btree->sb;
 	struct block_segment tmp, *seg = rq->seg;
-	int i, partial = 0;
+	int i, partial = 0, temp_count = 0;
 
 	assert(rq->seg_idx + write_segs <= rq->seg_max);
 
@@ -388,6 +388,12 @@ static int seg_alloc(struct btree *btree, struct dleaf_req *rq,
 		if (seg[i].state != BLOCK_SEG_HOLE)
 			continue;
 
+		/* CHECK */
+		if (seg[0].compress_count) {
+			temp_count = seg[i].count;
+			seg[i].count = seg[0].compress_count;
+			printk("Compress_count : %u",seg[0].compress_count);
+		}
 		err = balloc_partial(sb, seg[i].count, &tmp, 1);
 		if (err) { // goal ???
 			/*
@@ -429,6 +435,11 @@ static int seg_alloc(struct btree *btree, struct dleaf_req *rq,
 			seg[i + 1].count = seg[i].count - tmp.count;
 
 			partial = 1;
+		}
+		if (temp_count) {
+			printk(KERN_INFO "\ninit seg[i].count : %u | compress_count : %u  | tmp.index : %Lu-- tmp.count : %u | last seg[i].count : %u",
+			       temp_count, seg[0].compress_count, tmp.block, tmp.count, seg[i].count);
+			tmp.count = temp_count;
 		}
 		seg[i] = tmp;
 
@@ -690,28 +701,31 @@ static int filemap_extent_io(enum map_mode mode, int rw, struct bufvec *bufvec)
 		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
 	}
 	struct inode *inode = bufvec_inode(bufvec);
-	block_t block, index = bufvec_contig_index(bufvec);
-	unsigned count = bufvec_contig_count(bufvec);
+	block_t block, index;
+	unsigned count;
 	int err;
 	struct block_segment seg[10];
 
 	/* FIXME: For now, this is only for write */
 	assert(mode != MAP_READ);
 
-	printk("\nfilemap_extent_io => inode : %lu | index : %Lu | count : %u", inode->i_ino, index, count);
 
 	if (bufvec->cb && S_ISREG(inode->i_mode) && ENABLE_TRANSPARENT_COMPRESSION) {
-		index = bufvec->compress_index;
-		count = bufvec->cb->nr_pages;
-
-		bufvec->compress_index += count;
-	}
-	/* CHECK */
-/*	if(bufvec->cb)
+		/* index = bufvec->compress_index; */
+		/* count = bufvec->cb->nr_pages; */
+		/* bufvec->compress_index += count; */
+		index = bufvec->cb->start;
+		count = bufvec->cb->len >> PAGE_CACHE_SHIFT;
+		printk("cb->start : %Lu | cb->len : %u",bufvec->cb->start,bufvec->cb->len >> PAGE_CACHE_SHIFT);
 		seg[0].compress_count = bufvec->cb->nr_pages;
-	else
+	} else {
+		index = bufvec_contig_index(bufvec);
+		count = bufvec_contig_count(bufvec);
 		seg[0].compress_count = 0;
-*/	
+	}
+
+	printk("\nfilemap_extent_io => inode : %lu | index : %Lu | count : %u", inode->i_ino, index, count);
+
 	int segs = map_region(inode, index, count, seg, ARRAY_SIZE(seg), mode);
 	if (segs < 0)
 		return segs;
@@ -784,9 +798,6 @@ static int __tux3_get_block(struct inode *inode, sector_t iblock,
 	struct block_segment seg;
 	int segs, delalloc;
 
-	printk(KERN_INFO"\n__tux3_get_block ==> inum %Lu, iblock %Lu, b_size %zu, create %d\n",
-	      tux_inode(inode)->inum, (u64)iblock, bh_result->b_size, create);
-
 	if (create == 3) {
 		delalloc = 1;
 		mode = MAP_READ;
@@ -813,10 +824,6 @@ static int __tux3_get_block(struct inode *inode, sector_t iblock,
 #endif
 
 	seg_to_buffer(sb, bh_result, &seg, delalloc);
-
-	printk(KERN_INFO"\n__tux3_get_block <== inum %Lu, mapped %d, block %Lu, size %zu\n",
-	      tux_inode(inode)->inum, buffer_mapped(bh_result),
-	      (u64)bh_result->b_blocknr, bh_result->b_size);
 
 	return 0;
 }
@@ -962,7 +969,6 @@ struct buffer_head *blockread(struct address_space *mapping, block_t iblock)
 
 	index = iblock >> (PAGE_CACHE_SHIFT - inode->i_blkbits);
 	offset = iblock & ((1 << (PAGE_CACHE_SHIFT - inode->i_blkbits)) - 1);
-	printk(KERN_INFO "\nblockread =>inum : %lu | index : %lu | offset : %u \n",mapping->host->i_ino,index,offset);
 	bh = find_get_buffer(mapping, index, offset);
 	if (bh)
 		goto out;

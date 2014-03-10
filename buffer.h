@@ -92,6 +92,9 @@ struct compressed_bio {
 	/* inode that owns this data */
 	struct inode *inode;
 
+	/* pages of this stride */
+	struct page *pages[16];
+	
 	/* starting offset in the inode for our pages */
 	block_t start;
 
@@ -109,16 +112,9 @@ struct compressed_bio {
 
 	/* IO errors */
 	int errors;
-	//int mirror_num;
 
 	/* for reads, this is the bio we are copying the data into */
 	//struct bio *orig_bio;
-
-	/*
-	 * the start of a variable length array of checksums only
-	 * used by reads
-	 */
-	//u32 sums;
 };
 
 /* Helper for buffer vector I/O */

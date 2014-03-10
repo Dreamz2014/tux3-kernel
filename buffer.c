@@ -160,7 +160,6 @@ void tux3_clear_buffer_dirty(struct buffer_head *buffer, unsigned delta)
 	struct address_space *buffer_mapping = buffer->b_assoc_map;
 
 	/* The buffer must not need to fork */
-	printk(KERN_INFO "\nCheck => inum : %lu | index : %Lu\n",buffer_inode(buffer)->i_ino, bufindex(buffer));
 	assert(buffer_can_modify(buffer, delta));
 
 	if (buffer_mapping) {

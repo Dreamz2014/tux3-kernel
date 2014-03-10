@@ -86,8 +86,8 @@ static int compressed_bio_init(struct compressed_bio *cb, struct inode *inode, b
 	cb->compressed_len = compressed_len;
 	cb->compress_type  = 1;
 	cb->errors   = 0;
-	
-     	atomic_set(&cb->pending_bios, 0);
+
+	atomic_set(&cb->pending_bios, 0);
 	return 0;
 }
 
@@ -110,7 +110,7 @@ int compress_stride(struct bufvec *bufvec)
 	workspace = init_workspace(len);
 	printk(KERN_INFO"\n[C]inode : %lu\n", inode->i_ino);
 	
-	in_len  = len * PAGE_CACHE_SIZE;
+	in_len  = len << PAGE_CACHE_SHIFT;
 	out_len = 0;
 
 	offset = 0;
@@ -143,7 +143,7 @@ int compress_stride(struct bufvec *bufvec)
 		goto out;
 	}
 	
-	bufvec->cb = kmalloc(sizeof(struct compressed_bio), GFP_NOFS);
+	bufvec->cb = kzalloc(sizeof(struct compressed_bio), GFP_NOFS);
 	if (!bufvec->cb) {
 		/* ERROR */
 		BUG_ON(1);

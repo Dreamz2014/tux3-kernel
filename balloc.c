@@ -450,12 +450,6 @@ static int __balloc(struct sb *sb, unsigned blocks, unsigned flags,
 	block_t goal = sb->nextblock;
 	int err;
 
-	/* CHECK */
-/*	printk("\n CHECK 0 !!! blocks = %u | our_page_count : %u", blocks, seg[0].compress_count);
-	if(seg[0].compress_count) {
-		printk("\n CHECK 1 !!! blocks = %u",seg->compress_count);
-		blocks = seg[0].compress_count;
-		}*/
 	/* For now, allow partial unconditionally */
 	err = balloc_from_range(sb, goal, sb->volblocks, blocks, flags,
 				seg, segs);
