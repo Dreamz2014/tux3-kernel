@@ -92,8 +92,8 @@ struct compressed_bio {
 	/* inode that owns this data */
 	struct inode *inode;
 
-	/* pages of this stride */
-	struct page *pages[16];
+	/* FIFO structure for end_io */
+	struct buffer_head *buffer;
 	
 	/* starting offset in the inode for our pages */
 	block_t start;
@@ -133,8 +133,6 @@ struct bufvec {
 	unsigned on_page_idx;
 
 	struct compressed_bio *cb;
-	unsigned compress_index;
-	
 	struct bio *bio;
 	struct buffer_head *bio_lastbuf;
 };

@@ -62,6 +62,7 @@ enum map_mode {
 };
 
 #include "filemap_hole.c"
+#include "mpage_compress.c"
 
 /* userland only */
 void show_segs(struct block_segment seg[], unsigned segs)
@@ -436,15 +437,14 @@ static int seg_alloc(struct btree *btree, struct dleaf_req *rq,
 
 			partial = 1;
 		}
-		if (temp_count) {
-			printk(KERN_INFO "\ninit seg[i].count : %u | compress_count : %u  | tmp.index : %Lu-- tmp.count : %u | last seg[i].count : %u",
-			       temp_count, seg[0].compress_count, tmp.block, tmp.count, seg[i].count);
-			tmp.count = temp_count;
-		}
+		
 		seg[i] = tmp;
 
 		log_balloc(sb, seg[i].block, seg[i].count);
 
+		if (temp_count)
+			seg[i].count = temp_count;
+			
 		seg[i].state = seg_state;
 	}
 
@@ -708,7 +708,6 @@ static int filemap_extent_io(enum map_mode mode, int rw, struct bufvec *bufvec)
 
 	/* FIXME: For now, this is only for write */
 	assert(mode != MAP_READ);
-
 
 	if (bufvec->cb && S_ISREG(inode->i_mode) && ENABLE_TRANSPARENT_COMPRESSION) {
 		/* index = bufvec->compress_index; */
@@ -1101,6 +1100,9 @@ static int tux3_readpages(struct file *file, struct address_space *mapping,
 	{
 		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
 	}
+	if(ENABLE_TRANSPARENT_COMPRESSION && S_ISREG(mapping->host->i_mode))
+		return mpage_readpages_compressed(mapping, pages, nr_pages, tux3_get_block);
+	
 	return mpage_readpages(mapping, pages, nr_pages, tux3_get_block);	//this is called !!!!! ->tux3_get_block
 }
 

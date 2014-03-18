@@ -86,7 +86,8 @@ static int compressed_bio_init(struct compressed_bio *cb, struct inode *inode, b
 	cb->compressed_len = compressed_len;
 	cb->compress_type  = 1;
 	cb->errors   = 0;
-
+	cb->buffer   = NULL;
+	
 	atomic_set(&cb->pending_bios, 0);
 	return 0;
 }

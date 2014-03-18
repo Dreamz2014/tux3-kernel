@@ -47,10 +47,13 @@ struct uptag {
 
 /* FIXME: ignoring version at all */
 
+#define HI_VER_BITS             24
 #define VER_BITS		16
 #define VER_MASK		((1 << VER_BITS))
 #define ADDR_BITS		48
 #define ADDR_MASK		((1ULL << ADDR_BITS) - 1)
+#define COMPRESS_BITS           56
+#define COMPRESS_MASK		((1ULL << COMPRESS_BITS) - 1)
 
 struct dleaf2 {
 	__be16 magic;			/* dleaf2 magic */
@@ -58,12 +61,13 @@ struct dleaf2 {
 //	struct uptag tag;
 	__be32 __unused;
 	struct diskextent2 {
-		__be64 verhi_logical;	/* verhi:16, logical:48 */
+		__be64 verhi_logical;	/* compress:8, verhi:8, logical:48 */
 		__be64 verlo_physical;	/* verlo:16, physical:48 */
 	} table[];
 };
 
 struct extent {
+	u8 compress_count;      /* no. of blocks allocated for compressed data */
 	u32 version;		/* version */
 	block_t logical;	/* logical address */
 	block_t physical;	/* physical address */
@@ -87,6 +91,9 @@ static inline void get_extent(struct diskextent2 *dex, struct extent *ex)
 	u64 val;
 
 	val = be64_to_cpu(dex->verhi_logical);
+	ex->compress_count = val >> COMPRESS_BITS;
+	/* FIXME : ex->version */
+	//val = val & COMPRESS_MASK;
 	ex->version = val >> ADDR_BITS;
 	ex->logical = val & ADDR_MASK;
 	
@@ -108,6 +115,20 @@ static inline void put_extent(struct diskextent2 *dex, u32 version,
 	dex->verhi_logical  = cpu_to_be64(verhi << ADDR_BITS | logical);
 	dex->verlo_physical = cpu_to_be64(verlo << ADDR_BITS | physical);
 
+}
+/* call after put_extent */
+static inline void put_extent_compressed_hack(struct diskextent2 *dex,
+					u8 compress_count)
+{
+	if(DEBUG_MODE_K==1)
+	{
+		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
+	}
+	printk(KERN_INFO "\nAdd compress_count to extent : %u", compress_count);
+	
+	block_t logical = be64_to_cpu(dex->verhi_logical) & ADDR_MASK;
+	u64 verhi = compress_count;
+	dex->verhi_logical  = cpu_to_be64(verhi << COMPRESS_BITS | logical);
 }
 
 static void dleaf2_btree_init(struct btree *btree)
@@ -472,6 +493,7 @@ static int dleaf2_write(struct btree *btree, tuxkey_t key_bottom,
 	block_t end_physical;
 	unsigned need, between, write_segs, rest_segs;
 	int need_split, ret;
+	unsigned compress_count = rq->seg->compress_count;
 
 recheck:
 	/* Paranoia checks */
@@ -594,7 +616,8 @@ recheck:
 		struct block_segment *seg = rq->seg + rq->seg_idx;
 
 		put_extent(dex_start, sb->version, key->start, seg->block);
-
+		put_extent_compressed_hack(dex_start, compress_count);
+		
 		key->start += seg->count;
 		key->len -= seg->count;
 		rq->seg_idx++;
@@ -649,7 +672,7 @@ static int dleaf2_read(struct btree *btree, tuxkey_t key_bottom,
 
 	/* Get start position of logical and physical */
 	get_extent(dex, &next);
-	printk(KERN_INFO "\n****Physical : %Lu | Logical : %Lu\n",next.physical,next.logical);//
+	printk(KERN_INFO "\n****Physical : %Lu | Logical : %Lu | Compress : %u\n",next.physical,next.logical,next.compress_count);//
 	physical = next.physical;
 	if (physical)
 		physical += key->start - next.logical;	/* add offset */
