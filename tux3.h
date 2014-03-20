@@ -17,7 +17,6 @@
 #include <linux/list_sort.h>
 
 #include "newDefines.h"
-//#include "compression.h"
 
 #include "trace.h"
 #include "buffer.h"
@@ -951,6 +950,8 @@ void tux3_check_destroy_inode_flags(struct inode *inode);
 #ifndef ENOATTR
 #define ENOATTR ENODATA
 #endif
+
+#include "compression.h"
 
 void atable_init_base(struct sb *sb);
 int xcache_dump(struct inode *inode);

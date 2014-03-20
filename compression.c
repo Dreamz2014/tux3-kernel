@@ -1,10 +1,7 @@
-#include <linux/vmalloc.h>
 #include <linux/err.h>
 #include <linux/lzo.h>
 #include <linux/highmem.h>
-//#include "compression.h"
 
-#define COMPRESSION_STRIDE_LEN 16
 #define C_LEN sizeof(unsigned)
 
 struct workspace
@@ -43,9 +40,9 @@ static struct workspace *init_workspace(unsigned stride_len)
 	if(!workspace)
 		return ERR_PTR(-ENOMEM);
 
-	workspace->memory   = vmalloc(LZO1X_MEM_COMPRESS);
-	workspace->c_buffer = vmalloc(lzo1x_worst_compress(PAGE_CACHE_SIZE*stride_len));
-	workspace->d_buffer = vmalloc(lzo1x_worst_compress(PAGE_CACHE_SIZE*stride_len));
+	workspace->memory   = kmalloc(LZO1X_MEM_COMPRESS, GFP_NOFS);
+	workspace->c_buffer = kmalloc(lzo1x_worst_compress(PAGE_CACHE_SIZE*stride_len), GFP_NOFS);
+	workspace->d_buffer = kmalloc(lzo1x_worst_compress(PAGE_CACHE_SIZE*stride_len), GFP_NOFS);
 
 	if (!workspace->memory || !workspace->d_buffer || !workspace->c_buffer)
 		goto fail;
@@ -53,7 +50,6 @@ static struct workspace *init_workspace(unsigned stride_len)
 	return workspace;
 	
 fail:
-
 	BUG_ON(1);
 	return ERR_PTR(-ENOMEM);
 }
@@ -64,13 +60,13 @@ static void free_workspace(struct workspace *workspace)
 	{
 		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
 	}	
-	vfree(workspace->memory);
-	vfree(workspace->c_buffer);
-	vfree(workspace->d_buffer);
+	kfree(workspace->memory);
+	kfree(workspace->c_buffer);
+	kfree(workspace->d_buffer);
 	kfree(workspace);
 }
 
-static int compressed_bio_init(struct compressed_bio *cb, struct inode *inode, block_t start,
+int compressed_bio_init(struct compressed_bio *cb, struct inode *inode, block_t start,
 			       unsigned nr_pages, unsigned len, unsigned compressed_len)
 {
 
@@ -186,4 +182,73 @@ int compress_stride(struct bufvec *bufvec)
 out:
 	free_workspace(workspace);
 	return ret;
+}
+
+int decompress_stride(struct compressed_bio *cb)
+{
+	struct inode *inode = cb->inode;
+	struct workspace *workspace;
+	struct page *page, *pages[16];
+	char *data;
+	size_t in_len, out_len;
+	unsigned nr_pages, offset;
+	int page_idx, index, ret, err, i;
+
+	nr_pages = cb->len >> PAGE_CACHE_SHIFT;
+	workspace = init_workspace(nr_pages); /* CHANGE */
+
+	offset = 0;
+	for (page_idx = 0; page_idx < cb->nr_pages; page_idx++) {
+		page = cb->compressed_pages[page_idx];
+		data = kmap_atomic(page);
+		memcpy((char *)workspace->c_buffer + offset, data, PAGE_CACHE_SIZE);
+		offset += PAGE_CACHE_SIZE;
+		kunmap_atomic(data);
+	}
+
+	err = 0;
+	in_len = read_compress_length(workspace->c_buffer);
+	cb->compressed_len = in_len;
+	out_len = cb->len;
+	printk(KERN_INFO "\nTry decompress from %zu to %zu", in_len, out_len);
+	err = lzo1x_decompress_safe(workspace->c_buffer + C_LEN, in_len, workspace->d_buffer,
+				    &out_len);
+	if (err != LZO_E_OK) {
+		printk(KERN_DEBUG "Tux3 Decompress Error : %d", err);
+		err = -1;
+	}
+	else
+		printk(KERN_INFO "DECOMPRESSED FROM %zu to %zu", in_len, out_len);
+	
+	ret = 0;
+	index = cb->start;
+	while (nr_pages > 0) {
+		ret = find_get_pages_contig(inode->i_mapping, index,
+					    min_t(unsigned long,
+						  nr_pages, ARRAY_SIZE(pages)), pages);
+		if (ret == 0) {
+			printk(KERN_INFO"***CHECK IN DECOMPRESS*** | Page_index : %u", index);
+			nr_pages -= 1;
+			index += 1;
+			continue;
+		}
+		
+		offset = 0;//cb->start % COMPRESSION_STRIDE_LEN << PAGE_CACHE_SHIFT;
+		for (i = 0; i < ret; i++) {
+			data = kmap_atomic(pages[i]);
+			memcpy(data, (char *)workspace->d_buffer + offset, PAGE_CACHE_SIZE);
+			offset += PAGE_CACHE_SIZE;
+			kunmap_atomic(data);
+
+			SetPageUptodate(pages[i]);
+			unlock_page(pages[i]);
+
+			page_cache_release(pages[i]);
+		}
+		nr_pages -= ret;
+		index += ret;
+	}
+
+	free_workspace(workspace);
+	return err;
 }

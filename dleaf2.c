@@ -672,7 +672,7 @@ static int dleaf2_read(struct btree *btree, tuxkey_t key_bottom,
 
 	/* Get start position of logical and physical */
 	get_extent(dex, &next);
-	printk(KERN_INFO "\n****Physical : %Lu | Logical : %Lu | Compress : %u\n",next.physical,next.logical,next.compress_count);//
+	printk(KERN_INFO "\n****Physical : %Lu | Logical : %Lu | Compress : %u\n",next.physical,next.logical,next.compress_count);
 	physical = next.physical;
 	if (physical)
 		physical += key->start - next.logical;	/* add offset */
@@ -680,9 +680,10 @@ static int dleaf2_read(struct btree *btree, tuxkey_t key_bottom,
 
 	do {
 		struct block_segment *seg = rq->seg + rq->seg_idx;
-
+		seg->compress_count = next.compress_count; /* CHECK */
+		
 		get_extent(dex, &next);
-		printk(KERN_INFO "\n****Physical : %Lu | Logical : %Lu\n",next.physical,next.logical);//
+		printk(KERN_INFO "\n****Physical : %Lu | Logical : %Lu | Compress : %u\n",next.physical,next.logical,next.compress_count);
 		/* Check of logical addr range of current and next. */
 		seg->count = min_t(u64, key->len, next.logical - key->start);
 		if (physical) {

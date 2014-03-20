@@ -45,34 +45,48 @@ static void mpage_end_io(struct bio *bio, int err)
 {
 	const int uptodate = test_bit(BIO_UPTODATE, &bio->bi_flags);
 	struct bio_vec *bvec = bio->bi_io_vec + bio->bi_vcnt - 1;
-
+	struct compressed_bio *cb = bio->bi_private;
+	struct page *page;
+	int page_idx, ret = 0;
+	
+	printk(KERN_INFO "\n==> IN MPAGE_END_IO");
 	do {
-		struct page *page = bvec->bv_page;
-
+		struct page *page = bvec->bv_page;		
 		if (--bvec >= bio->bi_io_vec)
 			prefetchw(&bvec->bv_page->flags);
-		if (bio_data_dir(bio) == READ) {
-			if (uptodate) {
-				SetPageUptodate(page);
-			} else {
-				ClearPageUptodate(page);
-				SetPageError(page);
-			}
-			unlock_page(page);
-		} else { /* bio_data_dir(bio) == WRITE */
-			if (!uptodate) {
-				SetPageError(page);
-				if (page->mapping)
-					set_bit(AS_EIO, &page->mapping->flags);
-			}
-			end_page_writeback(page);
+
+		if (uptodate) {
+			SetPageUptodate(page);
+		} else {
+			ClearPageUptodate(page);
+			SetPageError(page);
 		}
+		unlock_page(page);
+			
 	} while (bvec >= bio->bi_io_vec);
+
+	if (!atomic_dec_and_test(&cb->pending_bios))
+		goto out;
+	
+	/* Last bio...start decompression */
+	ret = decompress_stride(cb);
+	
+	for (page_idx = 0; page_idx < cb->nr_pages; page_idx++) {
+		page = cb->compressed_pages[page_idx];
+		page->mapping = NULL;
+		page_cache_release(page);
+	}
+	
+	kfree(cb->compressed_pages);
+	kfree(cb);
+out:
 	bio_put(bio);
 }
 
 static struct bio *mpage_bio_submit(int rw, struct bio *bio)
 {
+	struct compressed_bio *cb = bio->bi_private;
+	atomic_inc(&cb->pending_bios);
 	bio->bi_end_io = mpage_end_io;
 	submit_bio(rw, bio);
 	return NULL;
@@ -91,7 +105,8 @@ mpage_alloc(struct block_device *bdev,
 		while (!bio && (nr_vecs /= 2))
 			bio = bio_alloc(gfp_flags, nr_vecs);
 	}
-
+	assert(bio);
+	
 	if (bio) {
 		bio->bi_bdev = bdev;
 		bio->bi_sector = first_sector;
@@ -154,7 +169,7 @@ map_buffer_to_page(struct page *page, struct buffer_head *bh, int page_block)
 static struct bio *
 do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 		sector_t *last_block_in_bio, struct buffer_head *map_bh,
-		unsigned long *first_logical_block, get_block_t get_block)
+		  unsigned long *first_logical_block, struct compressed_bio **cb, get_block_t get_block)
 {
 	struct inode *inode = page->mapping->host;
 	const unsigned blkbits = inode->i_blkbits;
@@ -167,11 +182,10 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 	unsigned page_block;                                         //Increments to 1
 	unsigned first_hole = blocks_per_page;
 	struct block_device *bdev = NULL;
-	int length;
 	int fully_mapped = 1;
 	unsigned nblocks;
 	unsigned relative_block;
-
+	int err;
 	/* blkbits = 12 | MAX_BUF_PER_PAGE = 8 */
 	
 	if (page_has_buffers(page))
@@ -194,7 +208,7 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 	
 	/* nblocks : Initially 0 | Later mapped to 1 extent so is mostly 16 */
 	nblocks = map_bh->b_size >> blkbits;
-	printk("\ncurrent_page : %Lu | nblocks_initial : %u", block_in_file, nblocks);
+	printk(KERN_INFO "\ncurrent_page : %Lu | nblocks_initial : %u", block_in_file, nblocks);
 
 	if (buffer_mapped(map_bh) && block_in_file > *first_logical_block &&
 			block_in_file < (*first_logical_block + nblocks)) {
@@ -216,7 +230,7 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 		}
 		bdev = map_bh->b_bdev;
 	}
-
+	
 	/*
 	 * Then do more get_blocks calls until we are done with this page.
 	 */
@@ -227,6 +241,13 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 
 		if (block_in_file < last_block) {
 			map_bh->b_size = (last_block - block_in_file) << blkbits;
+			/* use of get_block => ***needs buffer_head map_bh 
+			 * bdev     = map_bh->b_dev
+			 * physical = map_bh->b_blocknr
+			 * nblocks  = map_bh->b_size (no of logical blocks in extent)
+			 * compress_count = map_bh->b_private
+			 * first_logical_block
+			 */
 			if (get_block(inode, block_in_file, map_bh, 0)) //BLOCK_MAPPER
 				goto confused;
 			*first_logical_block = block_in_file;
@@ -262,9 +283,26 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 		if (page_block && blocks[page_block-1] != map_bh->b_blocknr-1)
 			goto confused;
 
-		//MAIN PART
 		nblocks = map_bh->b_size >> blkbits;
-		printk("\nnblocks_mapped : %u", nblocks);
+		printk(KERN_INFO "\nnblocks_mapped : %u", nblocks);
+		//MAIN PART
+		if (!*cb) {
+			*cb = kzalloc(sizeof(struct compressed_bio), GFP_NOFS);
+			if (!*cb) {
+				/* ERROR */
+				BUG_ON(1);
+				err = -ENOMEM;
+			}
+			err = compressed_bio_init(*cb, inode, *first_logical_block, *(unsigned *)map_bh->b_private,
+						  nblocks << PAGE_CACHE_SHIFT, 0);//compressed_len = 0
+			if (err) {
+				/* ERROR = -ENOMEM */
+				err = -ENOMEM;
+			}
+			kfree((unsigned *)map_bh->b_private);
+			map_bh->b_private = NULL;
+		}
+		
 		for (relative_block = 0; ; relative_block++) {
 			if (relative_block == nblocks) {
 				clear_buffer_mapped(map_bh);
@@ -287,50 +325,51 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 			goto out;
 		}
 	} else if (fully_mapped) {
-                //TRUE
+                //TRUE...REQ?
 		SetPageMappedToDisk(page);
 	}
 	
 	if (fully_mapped && blocks_per_page == 1 && !PageUptodate(page) &&
 	    cleancache_get_page(page) == 0) {
 		//FALSE
-		printk("\nSet_Page_Uptodate");
+		printk(KERN_INFO "\nSet_Page_Uptodate");
 		SetPageUptodate(page);
 		goto confused;
 	}
 	/*
 	 * This page will go to BIO.  Do we need to send this BIO off first?
 	 */
-	if (bio && (*last_block_in_bio != blocks[0] - 1))
-		bio = mpage_bio_submit(READ, bio);
+/* 	if (bio && (*last_block_in_bio != blocks[0] - 1)) */
+/* 		bio = mpage_bio_submit(READ, bio); */
 
-alloc_new:
-	if (bio == NULL) {
-		bio = mpage_alloc(bdev, blocks[0] << (blkbits - 9),
-			  	min_t(int, nr_pages, bio_get_nr_vecs(bdev)),
-				GFP_KERNEL);
-		if (bio == NULL)
-			goto confused;
-	}
+/* alloc_new: */
+/* 	if (bio == NULL) { */
+/* 		bio = mpage_alloc(bdev, blocks[0] << (blkbits - 9), */
+/* 			  	min_t(int, nr_pages, bio_get_nr_vecs(bdev)), */
+/* 				GFP_KERNEL); */
+/* 		if (bio == NULL) */
+/* 			goto confused; */
+/* 	} */
 
-	length = first_hole << blkbits;
-	if (bio_add_page(bio, page, length, 0) < length) {
-		bio = mpage_bio_submit(READ, bio);
-		goto alloc_new;
-	}
+/* 	length = first_hole << blkbits; */
+/* 	if (bio_add_page(bio, page, length, 0) < length) { */
+/* 		bio = mpage_bio_submit(READ, bio); */
+/* 		goto alloc_new; */
+/* 	} */
 
-	relative_block = block_in_file - *first_logical_block;
-	nblocks = map_bh->b_size >> blkbits;
-	if ((buffer_boundary(map_bh) && relative_block == nblocks) ||
-	    (first_hole != blocks_per_page))
-		bio = mpage_bio_submit(READ, bio);
-	else
-		*last_block_in_bio = blocks[blocks_per_page - 1];
+/* 	relative_block = block_in_file - *first_logical_block; */
+/* 	nblocks = map_bh->b_size >> blkbits; */
+/* 	if ((buffer_boundary(map_bh) && relative_block == nblocks) || */
+/* 	    (first_hole != blocks_per_page)) */
+/* 		bio = mpage_bio_submit(READ, bio); */
+/* 	else */
+/* 		*last_block_in_bio = blocks[blocks_per_page - 1]; */
+	
 out:
 	return bio;
 
 confused:
-	printk("\nCONFUSED !");
+	printk(KERN_INFO "\nCONFUSED !");
 	if (bio)
 		bio = mpage_bio_submit(READ, bio);
 	if (!PageUptodate(page))
@@ -383,48 +422,127 @@ confused:
  *
  * This all causes the disk requests to be issued in the correct order.
  */
+
 int
 mpage_readpages_compressed(struct address_space *mapping, struct list_head *pages,
 				unsigned nr_pages, get_block_t get_block)
 {
 	struct bio *bio = NULL;
-	unsigned page_idx;
+	struct inode *inode = mapping->host;
+	unsigned page_idx, count, nr_to_read;
 	sector_t last_block_in_bio = 0;
 	struct buffer_head map_bh;
 	unsigned long first_logical_block = 0;
+	struct compressed_bio *cb;
+	struct page *page;
+	
+	loff_t isize = i_size_read(inode);
+	unsigned long prev_index = 0, end_index = ((isize - 1) >> PAGE_CACHE_SHIFT);
+	struct list_head *list;
+	
+	list = pages->prev;
+	for (page_idx = 0; page_idx < nr_pages; page_idx++) {
+		page = list_entry(list, struct page, lru);
+		prev_index = page->index;
+		list = list->prev;
+	}
+	if (prev_index == end_index || nr_pages >= COMPRESSION_STRIDE_LEN)
+		goto again;
+		
+	/* Start Readahead : mm/readahead.c*/
+	prev_index++;
+	nr_to_read = COMPRESSION_STRIDE_LEN - nr_pages;
+	printk(KERN_INFO "Start Readahead for %u pages", nr_to_read);
+	for (page_idx = 0; page_idx < nr_to_read; page_idx++) {
+		pgoff_t page_offset = prev_index + page_idx;
 
+		if (page_offset > end_index)
+			break;
+
+		rcu_read_lock();
+		page = radix_tree_lookup(&mapping->page_tree, page_offset);
+		rcu_read_unlock();
+		if (page)
+			continue;
+
+		page = page_cache_alloc_readahead(mapping);
+		if (!page) {
+			printk(KERN_INFO "Page Readahead Failed");
+			break;
+		}
+		page->index = page_offset;
+		list_add(&page->lru, pages);
+		if (page_idx == nr_to_read)
+			SetPageReadahead(page);
+		nr_pages++;
+	}
+				
+again:
+	cb = NULL;
 	map_bh.b_state = 0;
 	map_bh.b_size = 0;
-	//grab_cache_page | read_cache_page
-	printk("\n\nIN MPAGE_READPAGES | nr_pages : %u", nr_pages);
-	for (page_idx = 0; page_idx < nr_pages; page_idx++) {
-		struct page *page = list_entry(pages->prev, struct page, lru);
-
+	printk(KERN_INFO "\n\n==> IN MPAGE_READPAGES | nr_pages : %u", nr_pages);
+	count = min_t(unsigned, nr_pages, COMPRESSION_STRIDE_LEN);
+	for (page_idx = 0; page_idx < count; page_idx++) {		
+		if (list_empty(pages->prev))
+			break;
+		
+		page = list_entry(pages->prev, struct page, lru);
 		prefetchw(&page->flags);
 		list_del(&page->lru);
+		
 		if (!add_to_page_cache_lru(page, mapping,
 					page->index, GFP_KERNEL)) {
 			
 			/* first_logical   : first_logical_block_of_extent
 			 * last_blk_in_bio : increments to last physical of bio
 			 */
-			printk("\n\n IN DO_MPAGE_READPAGE");
+			printk(KERN_INFO "\n IN DO_MPAGE_READPAGE");
 			bio = do_mpage_readpage(bio, page,
-					nr_pages - page_idx,
-					&last_block_in_bio, &map_bh,
-					&first_logical_block,
-					get_block);
-			printk("\n OUT DO_MPAGE_READPAGE");
+						nr_pages - page_idx,
+						&last_block_in_bio, &map_bh,
+						&first_logical_block, &cb,
+						get_block);
+			assert(cb);
+			printk(KERN_INFO "\n OUT DO_MPAGE_READPAGE");
 		}
 		page_cache_release(page);
 	}
-	printk("\n\nOUT MPAGE_READPAGES \n---first_logical : %lu",first_logical_block);
-	BUG_ON(!list_empty(pages));
+	printk(KERN_INFO "\n\n==>OUT MPAGE_READPAGES | first_logical : %lu",first_logical_block);
+
+	/* create and submit bio for compressed_read */
+	for (page_idx = 0; page_idx < cb->nr_pages; page_idx++) {
+		page = alloc_page(GFP_NOFS |__GFP_HIGHMEM);
+		page->mapping = NULL;
+		page->index = cb->start + page_idx;
+		cb->compressed_pages[page_idx] = page;
+		
+		/* Try to add pages to exists bio */
+		if (!bio || !bio_add_page(bio, page, PAGE_CACHE_SIZE, 0)) {
+			/* Couldn't add. So submit old bio and allocate new bio */
+			if (bio)
+				bio = mpage_bio_submit(READ, bio);
+
+			bio = mpage_alloc(map_bh.b_bdev, (map_bh.b_blocknr + page_idx) << (cb->inode->i_blkbits - 9),
+					  min_t(int, cb->nr_pages - page_idx, bio_get_nr_vecs(map_bh.b_bdev)), 
+					  GFP_NOFS); 
+			bio->bi_private = cb;
+			
+			if (!bio_add_page(bio, page, PAGE_CACHE_SIZE, 0))
+				assert(0);	/* why? */
+		}		
+	}
+	
 	if (bio)
-		mpage_bio_submit(READ, bio);
+		bio = mpage_bio_submit(READ, bio);
+
+	nr_pages -= count;
+	if(nr_pages > 0)
+		goto again;
+	
+	BUG_ON(!list_empty(pages));
 	return 0;
 }
-//EXPORT_SYMBOL(mpage_readpages_compressed);
 
 /*
  * This isn't called much at all
@@ -434,40 +552,14 @@ int mpage_readpage(struct page *page, get_block_t get_block)
 	struct bio *bio = NULL;
 	sector_t last_block_in_bio = 0;
 	struct buffer_head map_bh;
+	struct compressed_bio *cb = NULL;
 	unsigned long first_logical_block = 0;
 
 	map_bh.b_state = 0;
 	map_bh.b_size = 0;
 	bio = do_mpage_readpage(bio, page, 1, &last_block_in_bio,
-			&map_bh, &first_logical_block, get_block);
+				&map_bh, &first_logical_block, &cb, get_block);
 	if (bio)
 		mpage_bio_submit(READ, bio);
 	return 0;
 }
-//EXPORT_SYMBOL(mpage_readpage);
-
-/* ******************************************************************* */
-
-/*
- * Writing is not so simple.
- *
- * If the page has buffers then they will be used for obtaining the disk
- * mapping.  We only support pages which are fully mapped-and-dirty, with a
- * special case for pages which are unmapped at the end: end-of-file.
- *
- * If the page has no buffers (preferred) then the page is mapped here.
- *
- * If all blocks are found to be contiguous then the page can go into the
- * BIO.  Otherwise fall back to the mapping's writepage().
- * 
- * FIXME: This code wants an estimate of how many pages are still to be
- * written, so it can intelligently allocate a suitably-sized BIO.  For now,
- * just allocate full-size (16-page) BIOs.
- */
-
-struct mpage_data {
-	struct bio *bio;
-	sector_t last_block_in_bio;
-	get_block_t *get_block;
-	unsigned use_writepage;
-};

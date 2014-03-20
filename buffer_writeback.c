@@ -3,7 +3,7 @@
  */
 
 #include "buffer_writebacklib.c"
-
+#include "compression.c"
 /*
  * Helper for waiting I/O
  */
@@ -109,8 +109,6 @@ static inline void bufvec_buffer_move_to_contig(struct bufvec *bufvec,
 	list_move_tail(&buffer->b_assoc_buffers, &bufvec->contig);
 	bufvec->contig_count++;
 }
-
-#include "compression.c"
 
 static void compressed_bio_add_buffer(struct bufvec *bufvec,
 				  struct buffer_head *new)

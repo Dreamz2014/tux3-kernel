@@ -779,6 +779,11 @@ static void seg_to_buffer(struct sb *sb, struct buffer_head *buffer,
 	default:
 		map_bh(buffer, vfs_sb(sb), seg->block);
 		buffer->b_size = seg->count << sb->blockbits;
+		if (ENABLE_TRANSPARENT_COMPRESSION && seg->compress_count) {
+			printk(KERN_INFO"==> set b_private to : %u", seg->compress_count);
+			buffer->b_private = kmalloc(sizeof(unsigned), GFP_NOFS);
+			*(unsigned *)buffer->b_private = seg->compress_count;
+		}
 		break;
 	}
 }
@@ -1088,6 +1093,7 @@ static int tux3_readpage(struct file *file, struct page *page)
 	{
 		printk(KERN_INFO"%25s  %25s  %4d  #in\n",__FILE__,__func__,__LINE__);
 	}
+	printk(KERN_INFO "\n\n***IN READPAGE***");
 	int err = mpage_readpage(page, tux3_get_block);
 	assert(!PageForked(page));	/* FIXME: handle forked page */
 	return err;
