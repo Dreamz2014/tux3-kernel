@@ -79,6 +79,7 @@ static void mpage_end_io(struct bio *bio, int err)
 	
 	kfree(cb->compressed_pages);
 	kfree(cb);
+
 out:
 	bio_put(bio);
 }
@@ -379,6 +380,42 @@ confused:
 	goto out;
 }
 
+unsigned readahead(struct address_space *mapping, struct list_head *pages,
+		   unsigned nr_to_read, unsigned long start_index, unsigned nr_pages)
+{
+	struct page *page;
+	unsigned page_idx;
+	pgoff_t page_offset;
+	loff_t isize = i_size_read(mapping->host);
+	unsigned long end_index = ((isize - 1) >> PAGE_CACHE_SHIFT);
+
+	printk(KERN_INFO "\nReadahead %u pages from INDEX : %lu", nr_to_read, start_index);
+	for (page_idx = 0; page_idx < nr_to_read; page_idx++) {
+		page_offset = start_index + page_idx;
+
+		if (page_offset > end_index)
+			break;
+
+		rcu_read_lock();
+		page = radix_tree_lookup(&mapping->page_tree, page_offset);
+		rcu_read_unlock();
+		if (page)
+			continue;
+
+		page = page_cache_alloc_readahead(mapping);
+		if (!page) {
+			printk(KERN_INFO "Page Readahead Failed");
+			break;
+		}
+		page->index = page_offset;
+		list_add(&page->lru, pages);
+		if (page_idx == nr_to_read)
+			SetPageReadahead(page);
+		nr_pages++;
+	}
+	return nr_pages;
+}
+
 /**
  * mpage_readpages - populate an address space with some pages & start reads against them
  * @mapping: the address_space
@@ -429,6 +466,7 @@ mpage_readpages_compressed(struct address_space *mapping, struct list_head *page
 {
 	struct bio *bio = NULL;
 	struct inode *inode = mapping->host;
+	const unsigned blkbits = inode->i_blkbits;
 	unsigned page_idx, count, nr_to_read;
 	sector_t last_block_in_bio = 0;
 	struct buffer_head map_bh;
@@ -439,7 +477,8 @@ mpage_readpages_compressed(struct address_space *mapping, struct list_head *page
 	loff_t isize = i_size_read(inode);
 	unsigned long prev_index = 0, end_index = ((isize - 1) >> PAGE_CACHE_SHIFT);
 	struct list_head *list;
-	
+
+again:
 	list = pages->prev;
 	for (page_idx = 0; page_idx < nr_pages; page_idx++) {
 		page = list_entry(list, struct page, lru);
@@ -447,7 +486,7 @@ mpage_readpages_compressed(struct address_space *mapping, struct list_head *page
 		list = list->prev;
 	}
 	if (prev_index == end_index || nr_pages >= COMPRESSION_STRIDE_LEN)
-		goto again;
+		goto start;
 		
 	/* Start Readahead : mm/readahead.c*/
 	prev_index++;
@@ -477,12 +516,14 @@ mpage_readpages_compressed(struct address_space *mapping, struct list_head *page
 		nr_pages++;
 	}
 				
-again:
+start:
 	cb = NULL;
 	map_bh.b_state = 0;
 	map_bh.b_size = 0;
 	printk(KERN_INFO "\n\n==> IN MPAGE_READPAGES | nr_pages : %u", nr_pages);
-	count = min_t(unsigned, nr_pages, COMPRESSION_STRIDE_LEN);
+	
+	/* for case when nr_pages > COMPRESSION_STRIDE_LEN...we use goto again */
+	count = min_t(unsigned, nr_pages, COMPRESSION_STRIDE_LEN); 
 	for (page_idx = 0; page_idx < count; page_idx++) {		
 		if (list_empty(pages->prev))
 			break;
@@ -499,11 +540,13 @@ again:
 			 */
 			printk(KERN_INFO "\n IN DO_MPAGE_READPAGE");
 			bio = do_mpage_readpage(bio, page,
-						nr_pages - page_idx,
+						count - page_idx,
 						&last_block_in_bio, &map_bh,
 						&first_logical_block, &cb,
-						get_block);
-			assert(cb);
+						get_block);//nr_pages -> count
+			
+			/* restrict count to size of logical extent | nblocks */
+			count = map_bh.b_size >> blkbits;		     		
 			printk(KERN_INFO "\n OUT DO_MPAGE_READPAGE");
 		}
 		page_cache_release(page);
@@ -523,7 +566,7 @@ again:
 			if (bio)
 				bio = mpage_bio_submit(READ, bio);
 
-			bio = mpage_alloc(map_bh.b_bdev, (map_bh.b_blocknr + page_idx) << (cb->inode->i_blkbits - 9),
+			bio = mpage_alloc(map_bh.b_bdev, (map_bh.b_blocknr + page_idx) << (blkbits - 9),
 					  min_t(int, cb->nr_pages - page_idx, bio_get_nr_vecs(map_bh.b_bdev)), 
 					  GFP_NOFS); 
 			bio->bi_private = cb;

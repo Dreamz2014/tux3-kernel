@@ -1,6 +1,6 @@
-#include <linux/err.h>
 #include <linux/lzo.h>
 #include <linux/highmem.h>
+#include <linux/err.h>
 
 #define C_LEN sizeof(unsigned)
 
@@ -195,7 +195,7 @@ int decompress_stride(struct compressed_bio *cb)
 	int page_idx, index, ret, err, i;
 
 	nr_pages = cb->len >> PAGE_CACHE_SHIFT;
-	workspace = init_workspace(nr_pages); /* CHANGE */
+	workspace = init_workspace(nr_pages);
 
 	offset = 0;
 	for (page_idx = 0; page_idx < cb->nr_pages; page_idx++) {
@@ -215,7 +215,6 @@ int decompress_stride(struct compressed_bio *cb)
 				    &out_len);
 	if (err != LZO_E_OK) {
 		printk(KERN_DEBUG "Tux3 Decompress Error : %d", err);
-		err = -1;
 	}
 	else
 		printk(KERN_INFO "DECOMPRESSED FROM %zu to %zu", in_len, out_len);
@@ -242,7 +241,6 @@ int decompress_stride(struct compressed_bio *cb)
 
 			SetPageUptodate(pages[i]);
 			unlock_page(pages[i]);
-
 			page_cache_release(pages[i]);
 		}
 		nr_pages -= ret;

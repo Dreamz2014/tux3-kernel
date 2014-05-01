@@ -710,9 +710,6 @@ static int filemap_extent_io(enum map_mode mode, int rw, struct bufvec *bufvec)
 	assert(mode != MAP_READ);
 
 	if (bufvec->cb && S_ISREG(inode->i_mode) && ENABLE_TRANSPARENT_COMPRESSION) {
-		/* index = bufvec->compress_index; */
-		/* count = bufvec->cb->nr_pages; */
-		/* bufvec->compress_index += count; */
 		index = bufvec->cb->start;
 		count = bufvec->cb->len >> PAGE_CACHE_SHIFT;
 		printk("cb->start : %Lu | cb->len : %u",bufvec->cb->start,bufvec->cb->len >> PAGE_CACHE_SHIFT);
@@ -733,7 +730,6 @@ static int filemap_extent_io(enum map_mode mode, int rw, struct bufvec *bufvec)
 	for (int i = 0; i < segs; i++) {
 		block = seg[i].block;
 		count = seg[i].count;
-		//printk("\nLoop => extent 0x%Lx/%x => %Lx", index, count, block);
 
 		err = blockio_vec(rw, bufvec, block, count);
 		if (err)
@@ -780,7 +776,6 @@ static void seg_to_buffer(struct sb *sb, struct buffer_head *buffer,
 		map_bh(buffer, vfs_sb(sb), seg->block);
 		buffer->b_size = seg->count << sb->blockbits;
 		if (ENABLE_TRANSPARENT_COMPRESSION && seg->compress_count) {
-			printk(KERN_INFO"==> set b_private to : %u", seg->compress_count);
 			buffer->b_private = kmalloc(sizeof(unsigned), GFP_NOFS);
 			*(unsigned *)buffer->b_private = seg->compress_count;
 		}
@@ -810,6 +805,9 @@ static int __tux3_get_block(struct inode *inode, sector_t iblock,
 		mode = create;
 	}
 	assert(mode < MAX_MAP_MODE);
+	
+	printk(KERN_INFO "\n__tux3_get_block => inode : %lu | iblock : %Lu | create : %d | max_blocks : %u", 
+			inode->i_ino, iblock, create, max_blocks);
 
 	segs = map_region(inode, iblock, max_blocks, &seg, 1, mode);
 	if (segs < 0) {

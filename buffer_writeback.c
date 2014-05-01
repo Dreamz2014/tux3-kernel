@@ -848,7 +848,7 @@ int bufvec_compressed_io(int rw, struct bufvec *bufvec, block_t physical, unsign
 	unsigned page_idx, i;
 
 	printk(KERN_INFO "\nbufvec_compressed => physical %Lu, count %u\n", physical, count);
-	assert(rw & WRITE);	/* FIXME: now only support WRITE */
+	assert(rw & WRITE);
 	assert(cb->nr_pages == count);
 
 	/* Remove stride no. of buffers from bufvec->contig */
@@ -1042,7 +1042,6 @@ static int bufvec_contig_collect(struct bufvec *bufvec)
 			break;
 	  
 		bufvec_buffer_move_to_contig(bufvec, buffer);
-		//printk(KERN_INFO "buffer %p", buffer);
 
 		if (list_empty(bufvec->buffers))
 			break;
